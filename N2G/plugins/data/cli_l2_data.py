@@ -221,6 +221,7 @@ class cli_l2_data:
         combine_peers=False,
         skip_lag=True,
         platforms=None,
+        add_mac_peers=False,
     ):
         # init attributes
         self.add_interfaces_data = add_interfaces_data
@@ -230,6 +231,7 @@ class cli_l2_data:
         self.combine_peers = combine_peers
         self.skip_lag = skip_lag
         self.platforms = platforms or ["_all_"]
+        self.add_mac_peers = add_mac_peers
         self.ttp_vars = ttp_vars or {
             "IfsNormalize": ttp_templates_vars.short_interface_names,
             "physical_ports": ttp_templates_vars.physical_ports,
@@ -305,6 +307,10 @@ class cli_l2_data:
         """
         self._parse(data)
         self._form_base_graph_dict()
+
+        if self.add_mac_peers: # <--- NEW CONDITIONAL CALL
+            self._form_mac_peers_graph_dict()
+
         # go through config statements
         if self.add_lag:
             self._add_lags_to_links_dict()
@@ -340,8 +346,21 @@ class cli_l2_data:
                     misc="N2G/cli_l2_data/{}.txt".format(platform_name)
                 )
                 parser.add_template(template=ttp_template, template_name=platform_name)
+
+                if self.add_mac_peers: # <--- NEW CONDITIONAL TEMPLATE LOADING
+                    try:
+                        mac_template = get_template(
+                            misc="N2G/cli_l2_data/{}_mac.txt".format(platform_name)
+                        )
+                        parser.add_template(template=mac_template, template_name=f"{platform_name}_mac")
+                    except FileNotFoundError:
+                        log.warning(f"MAC address table template not found for {platform_name}. Skipping.")
+
                 for item in text_list:
                     parser.add_input(item, template_name=platform_name)
+
+                    if self.add_mac_peers: # <--- NEW CONDITIONAL INPUT ADDITION
+                        parser.add_input(item, template_name=f"{platform_name}_mac") # Use the same input for MAC parsing
         # process directories at OS path
         elif isinstance(data, str):
             parser = ttp(vars=self.ttp_vars, base_path=data)
@@ -364,6 +383,19 @@ class cli_l2_data:
                         parser.add_input(
                             data=os.path.abspath(entry), template_name=platform_name
                         )
+
+                        # Load MAC address table templates if feature is enabled
+                        if self.add_mac_peers: # <--- NEW CONDITIONAL TEMPLATE LOADING
+                            try:
+                                mac_template = get_template(
+                                    misc="N2G/cli_l2_data/{}_mac.txt".format(platform_name)
+                                )
+                                parser.add_template(template=mac_template, template_name=f"{platform_name}_mac")
+                                parser.add_input(
+                                    data=os.path.abspath(entry), template_name=f"{platform_name}_mac"
+                                )
+                            except FileNotFoundError:
+                                log.warning(f"MAC address table template not found for {platform_name}. Skipping.")
         else:
             log.error(
                 "Expecting dictionary or string, but '{}' given".format(type(data))
@@ -384,6 +416,80 @@ class cli_l2_data:
                     self._add_node({"id": item["source"]}, host_data)
                     self._add_node(item["target"], hosts.get(item["target"]["id"], {}))
                     self._add_link(item, hosts, host_data)
+
+    def _form_mac_peers_graph_dict(self):
+        """
+        Method to process parsed MAC address table data and add unknown nodes and links.
+        """
+        for platform, hosts in self.parsed_data.items():
+            for hostname, host_data in hosts.items():
+                for mac_entry in host_data.get("mac_addresses", []):
+                    mac_address = mac_entry.get("mac_address")
+                    vlan_id = mac_entry.get("vlan_id")
+                    interface = mac_entry.get("interface")
+
+                    if not (mac_address and interface):
+                        continue # Skip entries without essential info
+
+                    # Create a unique ID for the unknown device
+                    # Using MAC and VLAN to ensure uniqueness if the same MAC appears in different VLANs
+                    unknown_node_id = f"MAC_{mac_address.replace(':', '').replace('.', '')}_VLAN_{vlan_id}"
+
+                    # Add the unknown device node
+                    self._add_node(
+                        item={
+                            "id": unknown_node_id,
+                            "label": f"Unknown Device\n({mac_address})",
+                            "shape_type": "rectangle", # Or 'ellipse', 'roundrectangle', etc.
+                            "color": "#FFC0CB", # Light pink for unknown devices
+                            "description": json.dumps(
+                                mac_entry, sort_keys=True, indent=4, separators=(",", ": ")
+                            ),
+                        },
+                        host_data={}, # No host_data for an unknown device
+                    )
+
+                    # Add a link from the local device to the unknown device
+                    link = {
+                        "source": hostname,
+                        "target": unknown_node_id,
+                        "src_label": interface,
+                        "trgt_label": f"VLAN {vlan_id}",
+                        "label": f"MAC Learned\nVLAN {vlan_id}",
+                        "description": json.dumps(
+                            {
+                                "mac_address": mac_address,
+                                "vlan_id": vlan_id,
+                                "local_interface": interface,
+                                "local_interface_data": host_data.get("interfaces", {}).get(interface, {})
+                            },
+                            sort_keys=True, indent=4, separators=(",", ": ")
+                        )
+                    }
+
+                    # Check for LAG membership for the interface
+                    intf_data = host_data.get("interfaces", {}).get(interface, {})
+                    if self.add_lag and (["src_label"] == lag_name):
+                        # Potentially update the description to reflect LAG
+                        link_desc = json.loads(link["description"])
+                        link_desc["local_interface"] = lag_name
+                        link_desc["local_interface_data"] = host_data.get("interfaces", {}).get(lag_name, {})
+                        link["description"] = json.dumps(link_desc, sort_keys=True, indent=4, separators=(",", ": "))
+
+
+                    link_hash = self._make_hash_tuple(link)
+                    if link_hash not in self.links_dict:
+                        self.links_dict[link_hash] = link
+                    else:
+                        # If a link already exists (e.g., another MAC on same interface/VLAN),
+                        # update its description to include the new MAC.
+                        existing_desc = json.loads(self.links_dict[link_hash]["description"])
+                        existing_desc.setdefault("mac_addresses_learned", []).append(
+                            {"mac_address": mac_address, "vlan_id": vlan_id}
+                        )
+                        self.links_dict[link_hash]["description"] = json.dumps(
+                            existing_desc, sort_keys=True, indent=4, separators=(",", ": ")
+                        )
 
     def _add_node(self, item, host_data):
         # add new node
