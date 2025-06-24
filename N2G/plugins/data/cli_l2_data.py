@@ -165,6 +165,7 @@ API Reference
 .. autoclass:: N2G.plugins.data.cli_l2_data.cli_l2_data
    :members:
 """
+
 if __name__ == "__main__":
     import sys
 
@@ -174,6 +175,7 @@ import logging
 import pprint
 import json
 import os
+import re
 
 try:
     from ttp import ttp
@@ -227,6 +229,7 @@ class cli_l2_data:
         self.group_links = group_links
         self.add_lag = add_lag
         self.add_all_connected = add_all_connected
+        self.add_l4l7_connected = True
         self.combine_peers = combine_peers
         self.skip_lag = skip_lag
         self.platforms = platforms or ["_all_"]
@@ -238,11 +241,17 @@ class cli_l2_data:
         self.drawing.node_duplicates = "update"
         self.parsed_data = {}
         self.nodes_dict = {}
+        self.nodes_parsed_dict = {}
         self.links_dict = {}
+        self.mac_dict = {}
         self.graph_dict = {"nodes": [], "links": []}
         self.lag_links_dict = {}  # used by add_lag method
         self.nodes_to_links_dict = {}  # used by group_links
         self.combine_peers_dict = {}  # used by combine_peers
+        self.l4_l7_platform = ["fortigate", "paloalto", "f5"]
+
+    def _normalize_mac(self, mac_address):
+        return re.sub(r"\W+", "", mac_address)
 
     def _make_hash_tuple(self, item):
         """
@@ -314,6 +323,8 @@ class cli_l2_data:
             self._add_all_connected()
         if self.combine_peers:
             self._combine_peers()
+        if self.add_l4l7_connected:
+            self._add_l4l7_connected()
         # form graph dictionary and add it to drawing
         self._update_drawing()
 
@@ -331,6 +342,7 @@ class cli_l2_data:
         if isinstance(data, dict):
             parser = ttp(vars=self.ttp_vars)
             for platform_name, text_list in data.items():
+                # print(platform_name)
                 if (
                     "_all_" not in self.platforms
                     and not platform_name in self.platforms
@@ -375,8 +387,13 @@ class cli_l2_data:
 
     def _form_base_graph_dict(self):
         for platform, hosts in self.parsed_data.items():
+            # ignore L4-L7 devices
+            if platform in self.l4_l7_platform:
+                continue
             for hostname, host_data in hosts.items():
+                self.nodes_parsed_dict[hostname] = host_data
                 for item in host_data.get("cdp_peers", []):
+                    # print(item)
                     self._add_node({"id": item["source"]}, host_data)
                     self._add_node(item["target"], hosts.get(item["target"]["id"], {}))
                     self._add_link(item, hosts, host_data)
@@ -593,6 +610,134 @@ class cli_l2_data:
                 self.links_dict[grouped_link_hash] = grouped_link
         del self.nodes_to_links_dict
 
+    def _find_endpoints_mac(self):
+        """
+        Create a dictionary entry per device which contains of interfaces and the list of mac addresses which are associated with that interface.
+        """
+        for platform, hosts in self.parsed_data.items():
+            if platform not in self.l4_l7_platform:
+                for hostname, host_data in hosts.items():
+                    interfaces = set(
+                        [item["interface"] for item in host_data["mac_address_table"]]
+                    )
+                    self.mac_dict[hostname] = {
+                        interface.upper(): [
+                            self._normalize_mac(mac_item["mac_address"])
+                            for mac_item in host_data["mac_address_table"]
+                            if mac_item["interface"] == interface
+                        ]
+                        for interface in interfaces
+                    }
+
+    def _find_non_interconnect(self):
+        non_interconnect_links = []
+        all_host_hash = []
+        link_hashes = []
+        # Remove interconnect links from the dictionary
+        for hostname, host_intf in self.mac_dict.items():
+            host_intf_names = host_intf.keys()
+
+            host_hash = [
+                (hostname, host_intf_name) for host_intf_name in host_intf_names
+            ]
+
+            for hash in host_hash:
+                if hash not in all_host_hash:
+                    all_host_hash.append(hash)
+
+        for _, link_data in self.links_dict.items():
+            keys = ["source", "src_label", "target", "trgt_label"]
+
+            for key in keys:
+                if not link_data.get(key):
+                    link_data[key] = ""
+
+            source_hostname = link_data["source"]
+            source_interface = link_data["src_label"]
+            target_hostname = link_data["target"]
+            target_interface = link_data["trgt_label"]
+            link_hashes = link_hashes + [
+                (source_hostname, source_interface),
+                (target_hostname, target_interface),
+            ]
+
+        # print([hash for hash in link_hashes if "HDC-ASW-VMHOST" in hash])
+        # print([hash for hash in all_host_hash if "HDC-ASW-VMHOST" in hash])
+
+        non_interconnect_links = [
+            item for item in all_host_hash if item not in link_hashes
+        ]
+
+        self.non_interconnect_links = non_interconnect_links
+
+    def _find_connected(self, mac):
+        self._find_endpoints_mac()
+        self._find_non_interconnect()
+
+        # Remove duplicates
+        for link in self.non_interconnect_links:
+            link_hostname = link[0]
+            link_interface = link[1]
+
+            try:
+                if (
+                    self._normalize_mac(mac)
+                    in self.mac_dict[link_hostname][link_interface]
+                ):
+                    print(link_hostname)
+                    print(link_interface)
+                    print(mac)
+
+                    return (link_hostname, link_interface)
+
+            except Exception as e:
+                print(e)
+
+        return (None, None)
+
+    def _add_l4l7_connected(self):
+        """
+        Add defined L4-L7 devices by matching the mac address of device interface with what is found inside network devices.
+        """
+        # Organize a dict of L4-L7 devices
+        # pprint.pprint([item for item in self.links_dict.keys()])
+
+        for platform, hosts in self.parsed_data.items():
+            if platform in self.l4_l7_platform:
+                for hostname, host_data in hosts.items():
+                    for intf_name, intf_data in host_data["interfaces"].items():
+                        if not "up" in intf_data["state"]["line"]:
+                            continue
+                        (trgt_hostname, trgt_itf_info) = self._find_connected(
+                            intf_data["state"]["mac"]
+                        )
+
+                        # If the mac address is found on a switch
+                        if trgt_hostname:
+                            link = {"source": hostname}
+                            link["target"] = trgt_hostname
+                            link["src_label"] = intf_name
+                            link["trgt_label"] = trgt_itf_info
+                            link["description"] = {
+                                "{}:{}".format(hostname, intf_name): "",
+                                "{}:{}".format(
+                                    trgt_hostname, trgt_itf_info
+                                ): json.dumps(
+                                    self.nodes_parsed_dict[trgt_hostname]["interfaces"][
+                                        trgt_itf_info
+                                    ],
+                                    sort_keys=True,
+                                    indent=4,
+                                    separators=(",", ": "),
+                                ),
+                            }
+
+                            link_hash = self._make_hash_tuple(link)
+                            if link_hash not in self.links_dict:
+                                self.links_dict[link_hash] = link
+
+        # FIX: Not sure how lldp peer is show inside L4L7 Devices
+
     def _add_all_connected(self):
         """
         Method to iterate over all interfaces and fine the ones that are
@@ -652,7 +797,7 @@ class cli_l2_data:
                         # update node bottom label as per lag interface description
                         node["bottom_label"] = (
                             "{}..".format(lag_intf_data["description"][:20])
-                            if lag_intf_data
+                            if lag_intf_data and lag_intf_data.get("description")
                             else node["bottom_label"]
                         )
                         # remove previous node that had ID based on lag member interface
