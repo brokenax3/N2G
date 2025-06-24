@@ -383,7 +383,7 @@ class cli_l2_data:
             return
         parser.parse(one=True)
         self.parsed_data = parser.result(structure="dictionary")
-        # pprint.pprint(self.parsed_data, width = 100)
+        # pprint.pprint(self.parsed_data["fortigate"], width = 100)
 
     def _form_base_graph_dict(self):
         for platform, hosts in self.parsed_data.items():
@@ -670,7 +670,7 @@ class cli_l2_data:
 
         self.non_interconnect_links = non_interconnect_links
 
-    def _find_connected(self, mac):
+    def _find_connected(self, mac, hostname):
         self._find_endpoints_mac()
         self._find_non_interconnect()
 
@@ -679,14 +679,18 @@ class cli_l2_data:
             link_hostname = link[0]
             link_interface = link[1]
 
+            # FIX: When the same mac address is found on the same interface, only the last one detected will be plotted.
             try:
                 if (
                     self._normalize_mac(mac)
                     in self.mac_dict[link_hostname][link_interface]
                 ):
-                    print(link_hostname)
-                    print(link_interface)
-                    print(mac)
+                    print(
+                        f"{hostname} with {mac} found connected to {link_hostname} on {link_interface}"
+                    )
+                    # print(link_hostname)
+                    # print(link_interface)
+                    # print(mac)
 
                     return (link_hostname, link_interface)
 
@@ -709,28 +713,30 @@ class cli_l2_data:
                         if not "up" in intf_data["state"]["line"]:
                             continue
                         (trgt_hostname, trgt_itf_info) = self._find_connected(
-                            intf_data["state"]["mac"]
+                            intf_data["state"]["mac"], hostname
                         )
 
                         # If the mac address is found on a switch
                         if trgt_hostname:
-                            link = {"source": hostname}
-                            link["target"] = trgt_hostname
-                            link["src_label"] = intf_name
-                            link["trgt_label"] = trgt_itf_info
-                            link["description"] = {
-                                "{}:{}".format(hostname, intf_name): "",
-                                "{}:{}".format(
-                                    trgt_hostname, trgt_itf_info
-                                ): json.dumps(
-                                    self.nodes_parsed_dict[trgt_hostname]["interfaces"][
-                                        trgt_itf_info
-                                    ],
-                                    sort_keys=True,
-                                    indent=4,
-                                    separators=(",", ": "),
-                                ),
+                            link = {
+                                "source" : trgt_hostname,
+                                "target" : hostname,
+                                "src_label" : trgt_itf_info,
+                                "trgt_label" : intf_name,
                             }
+                            link["description"] = json.dumps(
+                                {
+                                    "{}:{}".format(
+                                        link["source"], link["src_label"]
+                                    ): self.nodes_parsed_dict[link["source"]][
+                                        "interfaces"
+                                    ][link["src_label"]],
+                                    "{}:{}".format(link["target"], link["trgt_label"]): intf_data["state"],
+                                },
+                                sort_keys=True,
+                                indent=4,
+                                separators=(",", ": "),
+                            )
 
                             link_hash = self._make_hash_tuple(link)
                             if link_hash not in self.links_dict:
