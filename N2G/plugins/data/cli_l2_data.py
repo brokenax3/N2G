@@ -220,6 +220,8 @@ class cli_l2_data:
         group_links=False,
         add_lag=False,
         add_all_connected=False,
+        add_external_connected=False,
+        external_platforms=["fortigate", "paloalto", "f5"],
         combine_peers=False,
         skip_lag=True,
         platforms=None,
@@ -229,7 +231,7 @@ class cli_l2_data:
         self.group_links = group_links
         self.add_lag = add_lag
         self.add_all_connected = add_all_connected
-        self.add_l4l7_connected = True
+        self.add_external_connected = add_external_connected
         self.combine_peers = combine_peers
         self.skip_lag = skip_lag
         self.platforms = platforms or ["_all_"]
@@ -248,7 +250,7 @@ class cli_l2_data:
         self.lag_links_dict = {}  # used by add_lag method
         self.nodes_to_links_dict = {}  # used by group_links
         self.combine_peers_dict = {}  # used by combine_peers
-        self.l4_l7_platform = ["fortigate", "paloalto", "f5"]
+        self.external_platforms = external_platforms
 
     def _normalize_mac(self, mac_address):
         return re.sub(r"\W+", "", mac_address)
@@ -323,8 +325,8 @@ class cli_l2_data:
             self._add_all_connected()
         if self.combine_peers:
             self._combine_peers()
-        if self.add_l4l7_connected:
-            self._add_l4l7_connected()
+        if self.add_external_connected:
+            self._add_external_connected()
         # form graph dictionary and add it to drawing
         self._update_drawing()
 
@@ -388,7 +390,7 @@ class cli_l2_data:
     def _form_base_graph_dict(self):
         for platform, hosts in self.parsed_data.items():
             # ignore L4-L7 devices
-            if platform in self.l4_l7_platform:
+            if platform in self.external_platforms:
                 continue
             for hostname, host_data in hosts.items():
                 self.nodes_parsed_dict[hostname] = host_data
@@ -615,7 +617,7 @@ class cli_l2_data:
         Create a dictionary entry per device which contains of interfaces and the list of mac addresses which are associated with that interface.
         """
         for platform, hosts in self.parsed_data.items():
-            if platform not in self.l4_l7_platform:
+            if platform not in self.external_platforms:
                 for hostname, host_data in hosts.items():
                     interfaces = set(
                         [item["interface"] for item in host_data["mac_address_table"]]
@@ -699,7 +701,7 @@ class cli_l2_data:
 
         return (None, None)
 
-    def _add_l4l7_connected(self):
+    def _add_external_connected(self):
         """
         Add defined L4-L7 devices by matching the mac address of device interface with what is found inside network devices.
         """
@@ -707,7 +709,7 @@ class cli_l2_data:
         # pprint.pprint([item for item in self.links_dict.keys()])
 
         for platform, hosts in self.parsed_data.items():
-            if platform in self.l4_l7_platform:
+            if platform in self.external_platforms:
                 for hostname, host_data in hosts.items():
                     for intf_name, intf_data in host_data["interfaces"].items():
                         if not "up" in intf_data["state"]["line"]:
