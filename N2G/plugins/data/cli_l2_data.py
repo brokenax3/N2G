@@ -385,7 +385,7 @@ class cli_l2_data:
             return
         parser.parse(one=True)
         self.parsed_data = parser.result(structure="dictionary")
-        # pprint.pprint(self.parsed_data["fortigate"], width = 100)
+        # pprint.pprint(self.parsed_data["testing"], width = 100)
 
     def _form_base_graph_dict(self):
         for platform, hosts in self.parsed_data.items():
@@ -710,6 +710,7 @@ class cli_l2_data:
 
         for platform, hosts in self.parsed_data.items():
             if platform in self.external_platforms:
+                # print(hosts)
                 for hostname, host_data in hosts.items():
                     for intf_name, intf_data in host_data["interfaces"].items():
                         if not "up" in intf_data["state"]["line"]:
